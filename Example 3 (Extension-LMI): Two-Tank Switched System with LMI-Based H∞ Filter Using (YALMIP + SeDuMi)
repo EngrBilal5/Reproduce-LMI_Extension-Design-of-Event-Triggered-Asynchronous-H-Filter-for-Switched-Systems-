@@ -1,0 +1,172 @@
+%% ===============================================================
+%  THIRD EXAMPLE – Two-Tank Switched System with LMI-Based H∞ Filter
+%  Requires: YALMIP + SeDuMi
+%% ===============================================================
+
+clear; clc; close all;
+
+%% ===============================================================
+%  SYSTEM MATRICES (Two-Tank System)
+%% ===============================================================
+
+A(:,:,1) = [0.92 0.04; 0.08 0.85];
+A(:,:,2) = [0.95 0.02; 0.05 0.90];
+
+B(:,:,1) = [0.1; 0.05];
+B(:,:,2) = [0.1; 0.05];
+
+C = [1 0];       % single-level measurement
+nx = 2; ny = 1;
+
+gamma = 1.2;     % desired H∞ performance bound
+
+%% ===============================================================
+%  LMI SETUP (H∞ FILTER SYNTHESIS)
+%% ===============================================================
+
+yalmip('clear');
+
+X1 = sdpvar(nx,nx,'symmetric');
+X2 = sdpvar(nx,nx,'symmetric');
+Cf = sdpvar(ny,nx,'full');
+
+LMI = [];
+
+for i=1:2
+    Xi = (i==1)*X1 + (i==2)*X2;
+    
+    Ai = A(:,:,i);
+    Bi = B(:,:,i);
+
+    M11 = Xi;
+    M12 = (Ai*Xi + Bi*Cf)';
+    M13 = (C*Xi - Cf)';
+
+    M22 = Xi;
+    M23 = zeros(nx,ny);
+
+    M33 = gamma*eye(ny);
+
+    LMI = [LMI, [M11 M12 M13;
+                 M12' M22 M23;
+                 M13' M23' M33] >= 1e-6];
+end
+
+opts = sdpsettings('solver','sedumi','verbose',0);
+sol = optimize(LMI,[],opts);
+
+if sol.problem~=0
+    error("LMI infeasible: %s", yalmiperror(sol.problem));
+end
+
+X1 = value(X1);
+X2 = value(X2);
+Cf = value(Cf);
+
+%% ===============================================================
+%  FILTER MATRICES CONSTRUCTION
+%% ===============================================================
+
+for i=1:2
+    Xi = (i==1)*X1 + (i==2)*X2;
+    Ai = A(:,:,i); Bi = B(:,:,i);
+
+    Af(:,:,i) = Xi\(Ai*Xi + Bi*Cf);
+    Bf(:,:,i) = Xi\Bi;
+end
+
+%% ===============================================================
+%  SIMULATION PARAMETERS
+%% ===============================================================
+
+T = 100;
+x  = zeros(nx,T);
+xh = zeros(nx,T);
+
+y  = zeros(1,T);
+yh = zeros(1,T);
+
+w = 0.05*randn(1,T);
+
+% switching signal
+sigma = [ones(1,50) 2*ones(1,50)];
+
+% event-trigger variables
+eta = 0.15;
+tau = 0;
+tau_hist = zeros(1,T);
+transmit_list = [];
+last_y_sent = 0;
+
+%% ===============================================================
+%  MAIN SIMULATION LOOP
+%% ===============================================================
+
+for k=1:T-1
+    
+    % plant output
+    y(k) = C*x(:,k);
+    
+    % store tau BEFORE update (correct behavior)
+    tau_hist(k) = tau;
+    
+    % compute event error
+    e_k = abs( y(k) - last_y_sent );
+    Lk  = e_k - eta*abs(last_y_sent);
+    
+    if Lk >= 0
+        last_y_sent = y(k);
+        transmit_list = [transmit_list, k];
+        tau = 0;
+    else
+        tau = tau + 1;
+    end
+    
+    % filter update
+    modeF = sigma(k);
+    xh(:,k+1) = Af(:,:,modeF)*xh(:,k) + Bf(:,:,modeF)*last_y_sent;
+    yh(k) = Cf*xh(:,k);
+    
+    % plant update
+    modeP = sigma(k);
+    x(:,k+1) = A(:,:,modeP)*x(:,k) + B(:,:,modeP)*w(k);
+end
+
+%% ===============================================================
+%  PERFORMANCE MEASUREMENT
+%% ===============================================================
+
+state_err_norm = vecnorm(x - xh);
+
+%% ===============================================================
+%  FIGURES (MATCHING ARTICLE STYLE)
+%% ===============================================================
+
+% ------------------------ (1) Event-triggered sampling
+figure;
+stem(0:T-1,ismember(0:T-1,transmit_list),'filled');
+title('Event-Triggered Sampling');
+xlabel('k'); ylabel('Trigger (0/1)');
+grid on;
+
+% ------------------------ (2) Event triggering instants (tau_k)
+figure;
+stem(0:T-1,tau_hist,'filled');
+title('Event Triggering Instants \tau_k');
+xlabel('k'); ylabel('\tau_k');
+grid on;
+
+% ------------------------ (3) Filtering error ||x - xhat||
+figure;
+plot(0:T-1,state_err_norm,'LineWidth',1.3);
+title('Filtering Error ||x - xhat||');
+xlabel('k'); ylabel('Error Norm');
+grid on;
+
+% ------------------------ (4) System and filter modes
+figure;
+stairs(0:T-1,sigma,'b','LineWidth',1.6); hold on;
+stairs(0:T-1,[sigma(1) sigma(1:T-1)],'r--','LineWidth',1.3);
+title('System and Filter Modes');
+legend('Plant Mode','Filter Mode');
+xlabel('k'); grid on;
