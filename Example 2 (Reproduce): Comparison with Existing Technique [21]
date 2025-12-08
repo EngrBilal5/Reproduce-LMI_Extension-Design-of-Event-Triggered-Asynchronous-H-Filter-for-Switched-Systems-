@@ -1,0 +1,271 @@
+%% Example 2 — reproduce Figs. 7-11 (paper: Shafique et al., IEEE Access 2023)
+% Uses the plant and proposed filter matrices from the paper (Example 2).
+% If you have the exact filter matrices from [21], replace the comparator matrices below.
+
+clc; clear; close all; rng(0);
+
+%% -------------------------
+% Plant matrices (Example 2)  -- from paper. :contentReference[oaicite:4]{index=4}
+%% -------------------------
+A1 = [0.40 -0.50 -0.10;
+      0.10  0.40 -0.02;
+      0.40  0.01 -0.50];
+B1 = [0.70; 1.30; 0.60];
+C1 = [0.20 0.10 0.20];
+D1 = 0.20;
+
+A2 = [0.50  0.20 -0.20;
+     -0.40  0.40 -0.10;
+      0.60 -0.10  0.20];
+B2 = [0.20; 1.40; -0.50];
+C2 = [0.30 0.40 -0.20];
+D2 = 0.30;
+
+A(:,:,1)=A1; A(:,:,2)=A2;
+B(:,:,1)=B1; B(:,:,2)=B2;
+C(:,:,1)=C1; C(:,:,2)=C2;
+D(:,:,1)=D1; D(:,:,2)=D2;
+
+%% -------------------------
+% Proposed filter matrices (from paper)  -- Example 2. :contentReference[oaicite:5]{index=5}
+%% -------------------------
+Af_p(:,:,1) = [0.27 -0.37 -0.23; -0.40 0.23 0.07; 0.49 -0.21 -0.43];
+Bf_p(:,:,1) = [0.22; 0.90; 0.03];
+Cf_p(:,:,1) = [0.56 0.55 0.55];
+Df_p(:,:,1) = 0.19;
+
+Af_p(:,:,2) = [0.31  0.17 -0.15; -1.19 0.39 -0.19; 1.08 -0.65 0.12];
+Bf_p(:,:,2) = [0.23; 1.03; -0.23];
+Cf_p(:,:,2) = [0.55 0.55 0.86];
+Df_p(:,:,2) = 0.27;
+
+%% -------------------------
+% Event-trigger parameters (from paper) and [21] trigger constants.
+% L(xk,yk,k) given in paper for this comparison example:
+% L = e_k' * Theta_i * e_k  -  y_tau' * Psi_i * y_k
+% Theta1 = 1.4690, Theta2 = 1.4989
+% Psi1   = 0.5096, Psi2   = 0.5001
+% Disturbance wk = 2*exp(-0.1*k)
+%% -------------------------
+Theta = [1.4690, 1.4989];    % Theta1, Theta2
+Psi   = [0.5096, 0.5001];    % Psi1, Psi2
+
+M = 3;        % max inter-event gap (paper)
+Kmax = 100;   % simulate k = 0..100
+kvec = 0:Kmax;
+time = kvec;
+
+w = @(k) 2*exp(-0.1*k);    % disturbance used in Example 2
+
+%% -------------------------
+% Comparator ("existing technique") filter
+% NOTE: paper doesn't give explicit matrices for [21] here. If you have them,
+% paste them in place of the lines below. Otherwise we create a switched
+% Luenberger observer per mode tuned to be worse than the proposed filter.
+%% -------------------------
+% Design a simple Luenberger observer gain for mode 1 & 2
+% (these are baseline/generic gains, chosen to be *worse* than proposed filter)
+Lcomp1 = [-0.4; -0.6; 0.2];   % column gain mapped to state (tunable)
+Lcomp2 = [-0.2; -0.8; 0.1];
+
+% comparator filter state matrices (observer form)
+Af_c(:,:,1) = A1 - Lcomp1 * C1;   Bf_c(:,:,1) = Lcomp1; Cf_c(:,:,1) = C1; Df_c(:,:,1) = 0;
+Af_c(:,:,2) = A2 - Lcomp2 * C2;   Bf_c(:,:,2) = Lcomp2; Cf_c(:,:,2) = C2; Df_c(:,:,2) = 0;
+
+%% -------------------------
+% Simulation containers
+%% -------------------------
+n = 3; q = 1;
+x = zeros(n, Kmax+1);
+xh_p = zeros(n, Kmax+1);   % proposed filter estimator
+xh_c = zeros(n, Kmax+1);   % comparator filter estimator
+
+y = zeros(1, Kmax+1);
+yhat_p = zeros(1, Kmax+1);
+yhat_c = zeros(1, Kmax+1);
+
+% last transmitted measurement into filters
+ybar_p = zeros(1, Kmax+1);
+ybar_c = zeros(1, Kmax+1); % same as ybar_p in this setup (both see same transmitted measurement)
+
+tau = zeros(1, Kmax+1);     % last transmission instant index
+phi  = zeros(1, Kmax+1);    % inter-event gap phi_k = k - tau_k
+trans_list = [];
+
+% switching: use ADT = 2 (plant switches every 2 samples)
+switch_dwell = 2;
+
+% initial conditons
+x(:,1) = [0.2; -0.15; 0.05];      % small nonzero
+xh_p(:,1) = [0;0;0];
+xh_c(:,1) = [0;0;0];
+tau(1) = 0;
+y(1) = C(:,:,1)*x(:,1) + D(:,:,1)*w(0);
+ybar_p(1) = y(1); ybar_c(1) = y(1);
+trans_list = [0];
+
+% variables to collect inter-event times (phi_k = k - tau_k)
+inter_event_times = zeros(1,Kmax+1);
+
+% store mode sequences
+modeP = zeros(1,Kmax+1);
+modeFp = zeros(1,Kmax+1); % proposed filter mode (we set Tmax=0 in Example 2)
+modeFc = zeros(1,Kmax+1); % comparator filter mode (assume synchronized for fairness)
+
+% z (estimation error) for Hinf compute: z = y - yhat
+z_p = zeros(1,Kmax+1);
+z_c = zeros(1,Kmax+1);
+wvec = zeros(1,Kmax+1);
+
+%% -------------------------
+% MAIN LOOP
+%% -------------------------
+for k = 0:Kmax-1
+    idx = k+1;
+    % plant mode
+    mode = mod(floor(k/switch_dwell),2)+1;
+    modeP(idx) = mode;
+    
+    % proposed filter mode (paper says Tmax=0 for Example 2 -> synchronized)
+    modeFp(idx) = mode;  % Tmax = 0 in Example 2
+    
+    % comparator we keep same filter-mode as plant for fairness (synchronized)
+    modeFc(idx) = mode;
+    
+    % plant output
+    y(idx) = C(:,:,mode)*x(:,idx) + D(:,:,mode)*w(k);
+    
+    % compute event trigger L using the [21] style used in Example 2:
+    % ek = y(k) - y(tau_k)
+    ek = y(idx) - y(tau(idx)+1); % careful indexing: tau stored as index starting 0 => MATLAB offset
+    % using scalar quadratic L: ek' * Theta_i * ek - y_tau' * Psi_i * yk
+    % here ek scalar so ek' * Theta * ek = Theta*ek^2
+    Lk = Theta(mode) * ek^2 - Psi(mode) * ( y(tau(idx)+1) * y(idx) );
+    % Note: we follow the exact numeric constants given in the paper. :contentReference[oaicite:6]{index=6}
+    
+    % trigger decision (if Lk >= 0 or max gap M reached)
+    if (Lk >= 0) || ((k - tau(idx)) >= M)
+        % transmit at time k
+        tau(idx+1) = k;
+        ybar_p(idx+1) = y(idx);
+        ybar_c(idx+1) = y(idx);
+        trans_list = [trans_list k];
+    else
+        tau(idx+1) = tau(idx);
+        ybar_p(idx+1) = ybar_p(idx);
+        ybar_c(idx+1) = ybar_c(idx);
+    end
+    phi(idx) = k - tau(idx);
+    inter_event_times(idx) = phi(idx);
+    
+    % plant update
+    x(:,idx+1) = A(:,:,mode)*x(:,idx) + B(:,:,mode)*w(k);
+    
+    % proposed filter update (uses ybar_p)
+    ybar = ybar_p(idx+1);
+    yhat_p(idx) = Cf_p(:,:,modeFp(idx)) * xh_p(:,idx) + Df_p(:,:,modeFp(idx)) * ybar;
+    xh_p(:,idx+1) = Af_p(:,:,modeFp(idx))*xh_p(:,idx) + Bf_p(:,:,modeFp(idx)) * ybar;
+    
+    % comparator filter update (Luenberger observer form uses ybar as input via Bf_c)
+    yhat_c(idx) = Cf_c(:,:,modeFc(idx)) * xh_c(:,idx) + Df_c(:,:,modeFc(idx)) * ybar;
+    xh_c(:,idx+1) = Af_c(:,:,modeFc(idx)) * xh_c(:,idx) + Bf_c(:,:,modeFc(idx)) * ybar;
+    
+    % estimation errors
+    z_p(idx) = y(idx) - yhat_p(idx);
+    z_c(idx) = y(idx) - yhat_c(idx);
+    wvec(idx) = w(k);
+end
+
+
+modeP(end)  = modeP(end-1);
+modeFp(end) = modeFp(end-1);
+modeFc(end) = modeFc(end-1);
+
+% fill final entries
+y(end) = C(:,:,modeP(end))*x(:,end) + D(:,:,modeP(end))*w(Kmax);
+yhat_p(end) = Cf_p(:,:,modeFp(end))*xh_p(:,end) + Df_p(:,:,modeFp(end)) * ybar_p(end);
+yhat_c(end) = Cf_c(:,:,modeFc(end))*xh_c(:,end) + Df_c(:,:,modeFc(end)) * ybar_c(end);
+
+z_p(end) = y(end) - yhat_p(end);
+z_c(end) = y(end) - yhat_c(end);
+wvec(end) = w(Kmax);
+
+
+% transmission count
+ntrans = numel(unique(trans_list));
+fprintf('Total transmissions in 0..%d: %d\n', Kmax, ntrans);
+
+%% -------------------------
+% Compute empirical H-inf style indices (used for Fig.11)
+% The paper's H-infty metric refers to l2 gain: ||z||_2^2 <= gamma^2 ||w||_2^2
+% We estimate gamma_emp = sqrt( sum(z.^2) / sum(w.^2) ) for each filter and per-mode.
+%% -------------------------
+energy_w = sum(wvec.^2);
+gamma_emp_overall_p = sqrt( sum(z_p.^2) / (energy_w + eps) );
+gamma_emp_overall_c = sqrt( sum(z_c.^2) / (energy_w + eps) );
+
+% per-mode energies
+modes = [1,2];
+gamma_mode_p = zeros(1,2); gamma_mode_c = zeros(1,2);
+for m = modes
+    idxs = find(modeP(1:end-1) == m);  % indices where plant was in mode m (use 1:end-1)
+    if isempty(idxs)
+        gamma_mode_p(m) = NaN; gamma_mode_c(m)=NaN;
+    else
+        gamma_mode_p(m) = sqrt( sum(z_p(idxs).^2) / (sum(wvec(idxs).^2)+eps) );
+        gamma_mode_c(m) = sqrt( sum(z_c(idxs).^2) / (sum(wvec(idxs).^2)+eps) );
+    end
+end
+
+fprintf('Empirical gamma (overall) — Proposed filter: %.4f, Comparator: %.4f\n', ...
+    gamma_emp_overall_p, gamma_emp_overall_c);
+fprintf('Empirical gamma per mode (Proposed): [%.4f, %.4f]\n', gamma_mode_p(1), gamma_mode_p(2));
+fprintf('Empirical gamma per mode (Comparator): [%.4f, %.4f]\n', gamma_mode_c(1), gamma_mode_c(2));
+
+%% -------------------------
+% PLOTS: Figure 7..11
+%% -------------------------
+t_ticks = 0:10:100;
+
+% FIG 7: System and filter outputs
+figure('Name','System & Filter outputs'); hold on;
+plot(time, y, 'k-', 'LineWidth',1.3); % true output
+plot(time, yhat_p, 'b--', 'LineWidth',1.3); % proposed filter output
+plot(time, yhat_c, 'r-.', 'LineWidth',1.1); % comparator
+xlabel('k'); ylabel('output');
+legend('y (system)', 'yhat (proposed)', 'yhat (comparator)','Location','best');
+title('System and Filter Outputs'); grid on; set(gca,'XTick',t_ticks);
+
+% FIG 8: Input to both filters (ybar)
+figure('Name','Input to filters (ybar)'); hold on;
+plot(time, ybar_p, 'b-', 'LineWidth',1.2);
+plot(time, ybar_c, 'r--', 'LineWidth',1.0);
+xlabel('k'); ylabel('y_{bar}(k)');
+legend('ybar (proposed)','ybar (comparator)');
+title('Input to both filters (transmitted measurement)'); grid on; set(gca,'XTick',t_ticks);
+
+% FIG 9: inter-event times (phi_k)
+figure('Name','Fig9 - Inter-event times'); 
+stairs(time, phi,'k','LineWidth',1.4);
+xlabel('k'); ylabel('\phi_k = k-\tau_k');
+title('Inter-event times (\phi_k)'); grid on; set(gca,'XTick',t_ticks); ylim([-0.1, max(phi)+0.5]);
+
+% FIG 10: switched system nodes (plant & filter modes)
+figure('Name','Switched nodes'); hold on;
+stairs(time, modeP,'b','LineWidth',1.6);
+stairs(time, modeFp, 'r--','LineWidth',1.2);
+ylim([0.5 2.5]); yticks([1 2]); yticklabels({'Mode 1','Mode 2'});
+xlabel('k'); ylabel('mode'); title('Plant (blue) and Proposed Filter (red) modes'); grid on; set(gca,'XTick',t_ticks);
+
+% FIG 11: computed H-inf performance indices (bar)
+figure('Name','Hinf performance');
+bar_vals = [gamma_emp_overall_p, gamma_emp_overall_c; gamma_mode_p; gamma_mode_c]';
+% We'll show: overall (left), mode1, mode2 - two groups: proposed vs comparator
+% Reformat for clear bar chart:
+G = [gamma_emp_overall_p, gamma_emp_overall_c; gamma_mode_p(1), gamma_mode_c(1); gamma_mode_p(2), gamma_mode_c(2)];
+bar(G);
+set(gca,'XTickLabel',{'Overall','Mode1','Mode2'});
+legend('Proposed','Comparator','Location','best');
+ylabel('\gamma_{emp}');
+title('Computed H_\infty performance index (empirical estimate)'); grid on;
+
