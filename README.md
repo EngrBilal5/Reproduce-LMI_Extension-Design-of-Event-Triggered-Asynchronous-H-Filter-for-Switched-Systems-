@@ -5,4 +5,4 @@ As a part of degree fulfillment; MS Systems Engg under the course of Robust Cont
 
 **This article includes two examples which are successfully reproduced; MATLAB Code is attached for each**  
 **Moreover;Example 3 (Extension-LMI): Two-Tank Switched System with LMI-Based H∞ Filter Using (YALMIP + SeDuMi) is added as an extension work and its MATLAB Code is also provided**  
-*Note: To Solve Example 3 in MATLAB; YALMIP & SeDuMi are required*
+*Note: To Solve Example 3 in MATLAB; YALMIP & SeDuMi are required (Optimization-Solver)*
